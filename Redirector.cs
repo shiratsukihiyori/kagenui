@@ -138,7 +138,24 @@ internal static class Redirector
 
         Log($"target={(targetNames.Length > 0 ? string.Join(",", targetNames) : "pid:" + targetPid)}  proxy={proxyHost}:{proxyPort}  relay=0.0.0.0:{relayPort}");
 
-        new Thread(RelayLoop) { IsBackground = true }.Start();
+        // 先同步把中继端口占住：绑不上就直接失败，避免"界面显示已接管、实际流量全进死端口"
+        try
+        {
+            _listener = new TcpListener(IPAddress.Any, relayPort);
+            _listener.Start(256);
+        }
+        catch (Exception e)
+        {
+            Log("中继端口 " + relayPort + " 绑定失败：" + e.Message + "（被占用？）");
+            running = false;
+            try { _listener?.Stop(); } catch { }
+            _listener = null;
+            return false;
+        }
+        ThreadLog("中继监听 0.0.0.0:" + relayPort);
+
+        var boundListener = _listener;
+        new Thread(() => RelayLoop(boundListener)) { IsBackground = true }.Start();
         new Thread(PidWatcher) { IsBackground = true }.Start();
         new Thread(Janitor) { IsBackground = true }.Start();
 
@@ -162,7 +179,7 @@ internal static class Redirector
         new Thread(() => ReplyLoop(_fh)) { IsBackground = true }.Start();
 
         // UDP：QUIC / DNS 也能走代理（SOCKS5 UDP ASSOCIATE）
-        if (UdpRelay.Start(proxyHost, proxyPort, ThreadLog, out var udpErr))
+        if (UdpRelay.Start(proxyHost, proxyPort, ThreadLog, IsLocalAddress, out var udpErr))
         {
             _uh = Native.WinDivertOpen("outbound and !loopback and ip and udp", LayerNetwork, 0, 0);
             _ufh = Native.WinDivertOpen("loopback and ip and udp and udp.SrcPort == " + UdpRelay.LocalPort, LayerNetwork, 0, 0);
@@ -215,6 +232,9 @@ internal static class Redirector
     }
 
     private static void ThreadLog(string msg) { LogFile(msg); Log(msg); }
+
+    private static bool IsLocalAddress(IPAddress addr) =>
+        IPAddress.IsLoopback(addr) || localAddrs.Contains(addr.ToString());
 
     private static void LoadLocalAddresses()
     {
@@ -291,6 +311,7 @@ internal static class Redirector
             foreach (var kv in flows)
                 if (now - kv.Value.LastSeen > TimeSpan.TicksPerMinute * 5)
                     flows.TryRemove(kv.Key, out _);
+            UdpRelay.Purge(TimeSpan.FromMinutes(5));   // UDP 流表同样要回收，否则长跑必泄漏
             Thread.Sleep(30000);
         }
     }
@@ -396,14 +417,8 @@ internal static class Redirector
             ThreadLog("WinDivertSend: " + Marshal.GetLastWin32Error());
     }
 
-    private static void RelayLoop()
+    private static void RelayLoop(TcpListener listener)
     {
-        var listener = new TcpListener(IPAddress.Any, relayPort);
-        try { listener.Start(256); }
-        catch (Exception e) { ThreadLog("中继端口绑定失败: " + e.Message); return; }
-        _listener = listener;
-        ThreadLog("中继监听 0.0.0.0:" + relayPort);
-
         while (running)
         {
             TcpClient client;

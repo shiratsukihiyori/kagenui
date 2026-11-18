@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -24,7 +25,8 @@ internal static class UdpRelay
 
     /// <summary>客户端端点 "ip:port" → 原始目标</summary>
     public static readonly ConcurrentDictionary<string, Flow> Flows = new();
-    private static readonly ConcurrentDictionary<string, string> Reverse = new();
+    /// <summary>远端 "ip:port" → 可能用到它的客户端集合（同一远端多个客户端时逐个投递）</summary>
+    private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> Reverse = new();
 
     private static TcpClient? _ctrl;
     private static NetworkStream? _ctrlStream;
@@ -33,45 +35,36 @@ internal static class UdpRelay
     private static IPEndPoint? _socksRelay;
     private static volatile bool _running;
     private static Action<string>? _log;
+    private static Func<IPAddress, bool>? _isLocal;
 
     public static bool IsRunning => _running;
 
-    public static bool Start(string proxyHost, int proxyPort, Action<string> log, out string? error)
+    public static bool Start(string proxyHost, int proxyPort, Action<string> log, Func<IPAddress, bool> isLocal, out string? error)
     {
         error = null;
         _log = log;
+        _isLocal = isLocal;
         try
         {
             _ctrl = new TcpClient { NoDelay = true };
             _ctrl.Connect(proxyHost, proxyPort);
             _ctrlStream = _ctrl.GetStream();
 
-            // SOCKS5 握手
             _ctrlStream.Write(new byte[] { 5, 1, 0 }, 0, 3);
             var greet = ReadExact(_ctrlStream, 2);
             if (greet[0] != 5 || greet[1] != 0) { error = "上游不是 SOCKS5"; return false; }
 
-            // UDP ASSOCIATE
             _ctrlStream.Write(new byte[] { 5, 3, 0, 1, 0, 0, 0, 0, 0, 0 }, 0, 10);
             var head = ReadExact(_ctrlStream, 4);
             if (head[1] != 0) { error = "UDP ASSOCIATE 被拒 (code " + head[1] + ")"; return false; }
 
             IPAddress bndIp;
-            if (head[3] == 1)
-            {
-                var a = ReadExact(_ctrlStream, 4);
-                bndIp = new IPAddress(a);
-            }
-            else if (head[3] == 4)
-            {
-                var a = ReadExact(_ctrlStream, 16);
-                bndIp = new IPAddress(a);
-            }
+            if (head[3] == 1) bndIp = new IPAddress(ReadExact(_ctrlStream, 4));
+            else if (head[3] == 4) bndIp = new IPAddress(ReadExact(_ctrlStream, 16));
             else
             {
                 var n = ReadExact(_ctrlStream, 1);
-                var d = ReadExact(_ctrlStream, n[0]);
-                var name = Encoding.ASCII.GetString(d);
+                var name = Encoding.ASCII.GetString(ReadExact(_ctrlStream, n[0]));
                 var resolved = Dns.GetHostAddresses(name);
                 bndIp = resolved.Length > 0 ? resolved[0] : IPAddress.Loopback;
             }
@@ -107,6 +100,23 @@ internal static class UdpRelay
         _local = null; _socks = null; _ctrlStream = null; _ctrl = null;
     }
 
+    /// <summary>回收过期流（由 Redirector.Janitor 周期调用），防止长时间运行内存只增不减。</summary>
+    public static void Purge(TimeSpan maxIdle)
+    {
+        long cutoff = DateTime.UtcNow.Ticks - maxIdle.Ticks;
+        foreach (var kv in Flows)
+        {
+            if (kv.Value.LastSeen >= cutoff) continue;
+            if (!Flows.TryRemove(kv.Key, out var flow)) continue;
+            var rkey = flow.RemoteIp + ":" + flow.RemotePort;
+            if (Reverse.TryGetValue(rkey, out var set))
+            {
+                set.TryRemove(kv.Key, out _);
+                if (set.IsEmpty) Reverse.TryRemove(rkey, out _);
+            }
+        }
+    }
+
     private static byte[] ReadExact(NetworkStream s, int n)
     {
         var b = new byte[n];
@@ -129,6 +139,14 @@ internal static class UdpRelay
                 IPEndPoint? from = null;
                 var data = _local!.Receive(ref from!);
                 if (from == null) continue;
+
+                // 只收本机来源：中继在 0.0.0.0 上监听，不校验的话同局域网可以往已知流里塞包
+                if (_isLocal != null && !_isLocal(from.Address))
+                {
+                    _log?.Invoke("UDP 丢弃非本机来源 " + from);
+                    continue;
+                }
+
                 var key = from.Address + ":" + from.Port;
                 if (!Flows.TryGetValue(key, out var flow)) continue;
                 flow.LastSeen = DateTime.UtcNow.Ticks;
@@ -154,27 +172,34 @@ internal static class UdpRelay
                 int pos = 3; // RSV(2) + FRAG(1)
                 IPAddress ip;
                 int atyp = data[pos++];
-                if (atyp == 1) { ip = new IPAddress(data[pos..(pos + 4)]); pos += 4; }
-                else if (atyp == 4) { ip = new IPAddress(data[pos..(pos + 16)]); pos += 16; }
+                if (atyp == 1) { ip = new IPAddress(data.AsSpan(pos, 4)); pos += 4; }
+                else if (atyp == 4) { ip = new IPAddress(data.AsSpan(pos, 16)); pos += 16; }
                 else
                 {
+                    // 域名形式回复：解析失败就丢弃，不要抛异常打断整个循环
                     int n = data[pos++];
                     var name = Encoding.ASCII.GetString(data, pos, n);
                     pos += n;
-                    ip = IPAddress.Parse(name);
+                    if (!IPAddress.TryParse(name, out var parsed))
+                    {
+                        try { parsed = Dns.GetHostAddresses(name) is { Length: > 0 } addrs ? addrs[0] : null; } catch { parsed = null; }
+                    }
+                    if (parsed == null) { _log?.Invoke("UDP 丢弃无法解析的域名回复 " + name); continue; }
+                    ip = parsed;
                 }
                 int port = (data[pos] << 8) | data[pos + 1];
                 pos += 2;
 
-                string rkey = ip + ":" + port;
-                string? clientKey = Reverse.TryGetValue(rkey, out var ck) ? ck : null;
-                if (clientKey == null) continue;
-                if (!Flows.TryGetValue(clientKey, out var flow)) continue;
-                flow.LastSeen = DateTime.UtcNow.Ticks;
+                if (!Reverse.TryGetValue(ip + ":" + port, out var clients)) continue;
+                var payload = data.AsSpan(pos).ToArray();
 
-                var payload = data[pos..];
-                var ep = ParseEndPoint(clientKey);
-                _local!.Send(payload, payload.Length, ep);
+                foreach (var key in clients.Keys)
+                {
+                    if (!Flows.TryGetValue(key, out var flow)) continue;
+                    flow.LastSeen = DateTime.UtcNow.Ticks;
+                    var ep = ParseEndPoint(key);
+                    try { _local!.Send(payload, payload.Length, ep); } catch { }
+                }
             }
             catch (ObjectDisposedException) { return; }
             catch (Exception e) { if (!_running) return; _log?.Invoke("UDP SOCKS: " + e.Message); Thread.Sleep(20); }
@@ -191,7 +216,7 @@ internal static class UdpRelay
     {
         var ipb = dst.GetAddressBytes();
         var pkt = new byte[3 + 1 + ipb.Length + 2 + payload.Length];
-        pkt[0] = 0; pkt[1] = 0; pkt[2] = 0; // RSV + FRAG
+        pkt[0] = 0; pkt[1] = 0; pkt[2] = 0;
         pkt[3] = (byte)(ipb.Length == 4 ? 1 : 4);
         Buffer.BlockCopy(ipb, 0, pkt, 4, ipb.Length);
         pkt[4 + ipb.Length] = (byte)(port >> 8);
@@ -204,7 +229,9 @@ internal static class UdpRelay
     {
         var key = clientIp + ":" + clientPort;
         Flows[key] = new Flow { RemoteIp = remoteIp, RemotePort = remotePort, LastSeen = DateTime.UtcNow.Ticks };
-        Reverse[remoteIp + ":" + remotePort] = key;
+        var rkey = remoteIp + ":" + remotePort;
+        var set = Reverse.GetOrAdd(rkey, _ => new ConcurrentDictionary<string, byte>());
+        set[key] = 0;
     }
 
     public static bool TryGetFlow(IPAddress clientIp, ushort clientPort, out Flow flow)
