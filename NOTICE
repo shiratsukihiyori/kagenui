@@ -1,0 +1,17 @@
+hg-accel
+Copyright (c) 2026 白月日和 (Shiratsuki Hiyori)
+Licensed under the MIT License. See LICENSE.
+
+本软件内嵌并随包分发以下第三方组件：
+
+1. WinDivert 2.2.2
+   Copyright (c) Basil (https://reqrypt.org/windivert.html)
+   双许可：GNU Lesser General Public License v3 或 GNU General Public License v2
+   完整许可文本见 third_party/WinDivert-LICENSE.txt
+   分发形式：engine/WinDivert.dll、engine/WinDivert64.sys（未修改的官方二进制，
+   构建时内嵌进 exe，运行时释放到 %LOCALAPPDATA%\hg-accel\engine\）
+   由于以独立动态库＋驱动文件形式分发，用户可自行替换为官方发布版本。
+
+2. .NET 8 Runtime
+   Copyright (c) .NET Foundation and Contributors
+   MIT License — https://github.com/dotnet/runtime/blob/main/LICENSE.TXT

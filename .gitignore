@@ -1,0 +1,28 @@
+# 构建输出
+bin/
+obj/
+*.user
+
+# 发布产物（通过 GitHub Releases 分发）
+publish/
+*.exe
+*.exe.sig
+*.exe.sha256
+release.json
+release.json.sig
+
+# 本地测试残留
+*.log
+*.tmp
+ui*.png
+icon-preview.png
+
+# 私钥 / 证书（绝不入库）
+*.key
+*.pfx
+*.p12
+ca/
+*.vault
+
+# 工作中目录
+wd/
