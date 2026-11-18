@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="726" height="120" viewBox="0 0 726 120" role="img" aria-label="by 白月日和 · Shiratsuki Hiyori">
+  <title>by 白月日和 · Shiratsuki Hiyori</title>
+  <defs>
+    <linearGradient id="cream" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FBF7EC"/>
+      <stop offset="1" stop-color="#F2EADA"/>
+    </linearGradient>
+    <linearGradient id="coral" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#EDA098"/>
+      <stop offset="1" stop-color="#DC7E76"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="722" height="116" rx="58" fill="url(#cream)" stroke="#E4D9C6" stroke-width="3"/>
+  <path d="M122 2 H60 A58 58 0 0 0 60 118 H122 Z" fill="url(#coral)"/>
+  <g transform="translate(61 60)">
+    <path d="M0 -18 L4.9 -6.2 L17.6 -6.2 L7.5 1.8 L11.3 14 L0 6.4 L-11.3 14 L-7.5 1.8 L-17.6 -6.2 L-4.9 -6.2 Z" fill="#F7D07A"/>
+    <circle cx="13" cy="-13" r="5" fill="#FBF7EC"/>
+    <circle cx="15.4" cy="-15.2" r="4" fill="url(#coral)"/>
+  </g>
+  <text x="150" y="63" font-family="Microsoft YaHei, PingFang SC, Yu Gothic, sans-serif" font-size="40" font-weight="700" fill="#24413E">白月日和</text>
+  <text x="151" y="94" font-family="Microsoft YaHei, PingFang SC, Yu Gothic, sans-serif" font-size="16" font-weight="500" letter-spacing="5.2" fill="#B08D2E">SHIRATSUKI HIYORI</text>
+  <text x="556" y="70" font-family="Microsoft YaHei, PingFang SC, Yu Gothic, sans-serif" font-size="26" font-weight="600" fill="#7A8B80">by</text>
+  <text x="598" y="70" font-family="Microsoft YaHei, PingFang SC, Yu Gothic, sans-serif" font-size="30" font-weight="700" fill="#C4705F">日和</text>
+</svg>
