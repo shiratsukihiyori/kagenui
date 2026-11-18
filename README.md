@@ -3,7 +3,7 @@
 > 影を縫う — 把指定进程的连线，一针一针缝进代理里。
 
 
-[![by 白月日和](docs/hiyori-badge.svg)](https://hiyori.xx.kg/)
+[![by 白月日和](docs/hiyori-badge.svg)](https://www.hiyori.xx.kg/)
 
 把**指定进程**的 TCP／UDP 流量转发进本机 HTTP/SOCKS5 代理。
 
