@@ -101,6 +101,9 @@ internal static class Redirector
     private static string proxyHost = "127.0.0.1";
     private static int proxyPort = 7890;
     private static int relayPort = 38999;
+
+    /// <summary>中继监听端口（供 Firewall 使用）。</summary>
+    public static int RelayPort => relayPort;
     private static string? launchPath;
     private static string? logPath;
     private static IntPtr _rh, _fh, _uh, _ufh;
@@ -153,6 +156,7 @@ internal static class Redirector
             return false;
         }
         ThreadLog("中继监听 0.0.0.0:" + relayPort);
+        Firewall.Ensure(ThreadLog);
 
         var boundListener = _listener;
         new Thread(() => RelayLoop(boundListener)) { IsBackground = true }.Start();
@@ -212,6 +216,7 @@ internal static class Redirector
     {
         if (!running) return;
         running = false;
+        try { Firewall.Remove(ThreadLog); } catch { }
         try { if (_listener != null) { _listener.Stop(); _listener = null; } } catch { }
         try { if (_rh != IntPtr.Zero) { Native.WinDivertClose(_rh); _rh = IntPtr.Zero; } } catch { }
         try { if (_fh != IntPtr.Zero) { Native.WinDivertClose(_fh); _fh = IntPtr.Zero; } } catch { }
