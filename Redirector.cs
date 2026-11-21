@@ -76,6 +76,18 @@ internal static class Redirector
         public static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool sorted, int af, int tableClass, uint reserved);
         [DllImport("iphlpapi.dll", SetLastError = true)]
         public static extern uint GetExtendedUdpTable(IntPtr table, ref int size, bool sorted, int af, int tableClass, uint reserved);
+        [DllImport("iphlpapi.dll", SetLastError = true)]
+        public static extern int SetTcpEntry(ref MibTcpRow row);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MibTcpRow
+        {
+            public uint State;
+            public uint LocalAddr;
+            public uint LocalPort;
+            public uint RemoteAddr;
+            public uint RemotePort;
+        }
     }
 
     private sealed class Flow
@@ -316,12 +328,81 @@ internal static class Redirector
                        .Where(n => n.Length > 0)
                        .Distinct(StringComparer.OrdinalIgnoreCase)
                        .ToArray();
+        string[] added;
         lock (pidLock)
         {
+            added = arr.Where(n => !liveNames.Contains(n)).ToArray();
             liveNames.Clear();
             foreach (var n in arr) liveNames.Add(n);
         }
         ThreadLog("目标列表已更新: " + (arr.Length == 0 ? "(空)" : string.Join(",", arr)));
+
+        // 新增的目标里，可能已经有程序在跑并且建好了连接。
+        // 那些连接不会被包过滤器接管，唯一干净的办法是把它断掉让程序重连——
+        // 重连的 SYN 就会按新列表被拦下。
+        if (added.Length > 0)
+        {
+            int n = ResetConnectionsOf(added);
+            if (n > 0) ThreadLog("已重置 " + n + " 条旧连接，" + string.Join(",", added) + " 会重连后进入代理");
+        }
+    }
+
+    /// <summary>
+    /// 把指定进程名当前已建立的 TCP 连接全部断掉（SetTcpEntry DELETE_TCB）。
+    /// 用于"运行中新增目标"场景：旧连接已经绕过过滤器建立，只能重置让程序重连。
+    /// 返回被重置的连接数。
+    /// </summary>
+    private static int ResetConnectionsOf(IEnumerable<string> names)
+    {
+        var wanted = new HashSet<int>();
+        foreach (var n in names)
+        {
+            try { foreach (var pr in Process.GetProcessesByName(n)) wanted.Add(pr.Id); } catch { }
+        }
+        if (wanted.Count == 0) return 0;
+
+        int size = 0;
+        Native.GetExtendedTcpTable(IntPtr.Zero, ref size, false, 2, TcpTableOwnerPidAll, 0);
+        if (size <= 0) return 0;
+
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        int reset = 0;
+        try
+        {
+            if (Native.GetExtendedTcpTable(buf, ref size, false, 2, TcpTableOwnerPidAll, 0) != 0) return 0;
+            int rows = Marshal.ReadInt32(buf);
+            IntPtr p = buf + 4;
+            int rowSize = Marshal.SizeOf<MibTcpRowEx>();
+            for (int i = 0; i < rows; i++, p += rowSize)
+            {
+                var row = Marshal.PtrToStructure<MibTcpRowEx>(p);
+                if (!wanted.Contains((int)row.OwningPid)) continue;
+                if (row.RemoteAddr == 0) continue;   // LISTEN 行没有远端
+
+                var del = new Native.MibTcpRow
+                {
+                    State = 12,                       // MIB_TCP_STATE_DELETE_TCB
+                    LocalAddr = row.LocalAddr,
+                    LocalPort = row.LocalPort,
+                    RemoteAddr = row.RemoteAddr,
+                    RemotePort = row.RemotePort,
+                };
+                if (Native.SetTcpEntry(ref del) == 0) reset++;
+            }
+        }
+        finally { Marshal.FreeHGlobal(buf); }
+        return reset;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MibTcpRowEx
+    {
+        public uint State;
+        public uint LocalAddr;
+        public uint LocalPort;
+        public uint RemoteAddr;
+        public uint RemotePort;
+        public uint OwningPid;
     }
 
     /// <summary>运行期把一个 PID 加进接管集合（验证探针用），不通过进程名匹配。</summary>
