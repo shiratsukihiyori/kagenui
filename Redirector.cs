@@ -113,14 +113,24 @@ internal static class Redirector
 
     public static bool IsRunning => running;
 
+    /// <summary>
+    /// 进程名规范化：UI 给的是 "chrome.exe"，而 Process.ProcessName 与
+    /// GetProcessesByName 用的都是不带扩展名的 "chrome"。
+    /// 启动路径和运行期同步必须走同一个函数，否则两边行为会悄悄分叉。
+    /// </summary>
+    private static string NormalizeName(string n)
+    {
+        n = n.Trim();
+        return n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n;
+    }
+
     public static bool Start(Options o)
     {
         if (running) return true;
 
         targetNames = (o.Names ?? Array.Empty<string>())
-            .Select(n => n.Trim())
+            .Select(NormalizeName)
             .Where(n => n.Length > 0)
-            .Select(n => n.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? n[..^4] : n)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         targetPid = o.Pid;
@@ -302,7 +312,8 @@ internal static class Redirector
     {
         if (!running) return;
         var arr = names.Where(n => !string.IsNullOrWhiteSpace(n))
-                       .Select(n => n.Trim())
+                       .Select(NormalizeName)
+                       .Where(n => n.Length > 0)
                        .Distinct(StringComparer.OrdinalIgnoreCase)
                        .ToArray();
         lock (pidLock)
