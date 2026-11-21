@@ -10,10 +10,10 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
 
-    <Version>1.0.3</Version>
-    <AssemblyVersion>1.0.3.0</AssemblyVersion>
-    <FileVersion>1.0.3.0</FileVersion>
-    <InformationalVersion>1.0.3</InformationalVersion>
+    <Version>1.0.4</Version>
+    <AssemblyVersion>1.0.4.0</AssemblyVersion>
+    <FileVersion>1.0.4.0</FileVersion>
+    <InformationalVersion>1.0.4</InformationalVersion>
     <AssemblyTitle>Kagenui</AssemblyTitle>
     <Product>Kagenui</Product>
     <Company>白月日和</Company>

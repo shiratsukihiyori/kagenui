@@ -20,6 +20,7 @@ internal static class Program
             int port = 7890;
             string? logFile = null;
             bool verbose = true;
+            string? resync = null;   // QA：--resync <秒>:<逗号分隔的进程名>，模拟运行中增删目标
             for (int i = 2; i < args.Length; i++)
             {
                 switch (args[i])
@@ -28,6 +29,7 @@ internal static class Program
                     case "--proxy": { var parts = args[++i].Split(':'); host = parts[0]; port = int.Parse(parts[1]); break; }
                     case "--log": logFile = args[++i]; break;
                     case "-q": verbose = false; break;
+                    case "--resync": resync = args[++i]; break;
                 }
             }
             void Sink(string m)
@@ -40,6 +42,19 @@ internal static class Program
             Engine.Preload(Sink);
             var ok = Redirector.Start(new Redirector.Options { Names = names.ToArray(), ProxyHost = host, ProxyPort = port, Verbose = verbose });
             Sink("start => " + ok);
+
+            // QA 钩子：模拟 UI 在运行期改动目标列表（走的是 MainForm 同一个 SyncTargets）
+            if (ok && resync != null)
+            {
+                var seg = resync.Split(':', 2);
+                int delay = int.TryParse(seg[0], out var d) ? d : 5;
+                var list = (seg.Length > 1 ? seg[1] : "").Split(',', StringSplitOptions.RemoveEmptyEntries);
+                new Thread(() =>
+                {
+                    Thread.Sleep(delay * 1000);
+                    Redirector.SyncTargets(list);
+                }) { IsBackground = true }.Start();
+            }
             Thread.Sleep(seconds * 1000);
             Redirector.Stop();
             Thread.Sleep(300);

@@ -91,8 +91,8 @@ public sealed class MainForm : Form
 
         // 事件
         btnAdd.Click += (_, _) => AddProcesses();
-        btnDel.Click += (_, _) => { foreach (var i in _targets.SelectedIndices.Cast<int>().OrderByDescending(x => x).ToList()) _targets.Items.RemoveAt(i); };
-        btnClear.Click += (_, _) => _targets.Items.Clear();
+        btnDel.Click += (_, _) => { foreach (var i in _targets.SelectedIndices.Cast<int>().OrderByDescending(x => x).ToList()) _targets.Items.RemoveAt(i); SyncTargetsIfRunning(); };
+        btnClear.Click += (_, _) => { _targets.Items.Clear(); SyncTargetsIfRunning(); };
         btnPick.Click += (_, _) => { using var d = new OpenFileDialog { Filter = "可执行文件|*.exe|所有文件|*.*" }; if (d.ShowDialog() == DialogResult.OK) _launchPath.Text = d.FileName; };
         btnLog.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", _logDir) { UseShellExecute = true });
         _btnStart.Click += (_, _) => Start();
@@ -111,6 +111,14 @@ public sealed class MainForm : Form
         foreach (var n in picker.SelectedNames.Distinct(StringComparer.OrdinalIgnoreCase))
             _targets.Items.Add(n);
         Log("已选 " + _targets.Items.Count + " 个进程");
+        SyncTargetsIfRunning();
+    }
+
+    /// <summary>列表变化后立刻推给正在运行的 Redirector，不需要停止再启动。</summary>
+    private void SyncTargetsIfRunning()
+    {
+        if (!Redirector.IsRunning) return;
+        Redirector.SyncTargets(_targets.Items.Cast<object>().Select(o => o.ToString() ?? ""));
     }
 
     private static bool IsAdmin()

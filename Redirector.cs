@@ -97,6 +97,8 @@ internal static class Redirector
     private static bool running;
     private static bool verbose = true;
     private static string[] targetNames = Array.Empty<string>();
+    // 运行期可变的目标名集合：停止/启动不影响，UI 增删会即时反映到这里
+    private static readonly HashSet<string> liveNames = new(StringComparer.OrdinalIgnoreCase);
     private static int targetPid;
     private static string proxyHost = "127.0.0.1";
     private static int proxyPort = 7890;
@@ -157,6 +159,12 @@ internal static class Redirector
         }
         ThreadLog("中继监听 0.0.0.0:" + relayPort);
         Firewall.Ensure(ThreadLog);
+
+        lock (pidLock)
+        {
+            liveNames.Clear();
+            foreach (var n in targetNames) liveNames.Add(n);
+        }
 
         var boundListener = _listener;
         new Thread(() => RelayLoop(boundListener)) { IsBackground = true }.Start();
@@ -260,7 +268,9 @@ internal static class Redirector
             {
                 var set = new HashSet<int>();
                 if (targetPid != 0) { try { Process.GetProcessById(targetPid); set.Add(targetPid); } catch { } }
-                foreach (var n in targetNames)
+                string[] names;
+                lock (pidLock) names = liveNames.ToArray();
+                foreach (var n in names)
                     foreach (var p in Process.GetProcessesByName(n)) set.Add(p.Id);
 
                 lock (pidLock)
@@ -284,6 +294,25 @@ internal static class Redirector
         return true;
     }
 
+    /// <summary>
+    /// 运行期同步目标列表：UI 里增删进程后立刻生效，不需要停止再启动。
+    /// 新出现的实例会在下一次连接时被 IsTarget 按名字匹配，PidWatcher 也会在 400ms 内补齐 PID。
+    /// </summary>
+    public static void SyncTargets(IEnumerable<string> names)
+    {
+        if (!running) return;
+        var arr = names.Where(n => !string.IsNullOrWhiteSpace(n))
+                       .Select(n => n.Trim())
+                       .Distinct(StringComparer.OrdinalIgnoreCase)
+                       .ToArray();
+        lock (pidLock)
+        {
+            liveNames.Clear();
+            foreach (var n in arr) liveNames.Add(n);
+        }
+        ThreadLog("目标列表已更新: " + (arr.Length == 0 ? "(空)" : string.Join(",", arr)));
+    }
+
     /// <summary>运行期把一个 PID 加进接管集合（验证探针用），不通过进程名匹配。</summary>
     public static void AddTargetPid(int pid)
     {
@@ -294,11 +323,12 @@ internal static class Redirector
     {
         lock (pidLock) { if (targetPids.Contains(pid) || extraPids.Contains(pid)) return true; }
         if (targetPid != 0 && pid == targetPid) return true;
-        if (targetNames.Length == 0) return false;
         try
         {
             string name = Process.GetProcessById(pid).ProcessName;
-            if (targetNames.Any(n => string.Equals(name, n, StringComparison.OrdinalIgnoreCase)))
+            bool hit;
+            lock (pidLock) hit = liveNames.Contains(name);
+            if (hit)
             {
                 lock (pidLock) targetPids.Add(pid);
                 return true;
