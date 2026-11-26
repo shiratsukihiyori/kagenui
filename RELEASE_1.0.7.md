@@ -106,7 +106,21 @@ DNS 一密集就是每秒上千次系统调用。现在 500ms 刷一次快照、
 ## 剩下的坑
 
 - QUIC（UDP:443）在上游 UDP 是黑洞时仍然不通，Chrome 会自动回落 TCP，可接受。
-- 上游 CONNECT 拒绝连 53 端口时，DNS 只能退回 SOCKS5 UDP（日志里会写明）。
-- 没做 DoH。要绕开「代理拒绝 CONNECT :53」的限制再加。
+- 上游连 CONNECT 443 都不通时，DNS 只剩 SOCKS5 UDP，与 1.0.6 表现一致。
+- DoH 走的是 1.1.1.1，不经过你上游配的那套 DNS：内网域名/hosts 级别的东西解析不到。
+  想用上游自己的解析器，得走 mihomo 的 `/dns/query`（需要 controller 地址和 secret）。
+
+## 校验
+
+```
+sha256    : c51163ab8e5f1da4d76d916cb93e8a2dfbac6578ccb8b25b5a258bed53c47ced
+大小      : 65,962,472 字节
+Ed25519   : 验证通过（node verify-exe.mjs kagenui.exe）
+Authenticode: Valid（cs5 + DigiCert 时间戳，2029-11-17 到期）
+sequence  : 9
+```
+
+两个签名都要一起换：改过 exe 之后 `kagenui.exe.sig`、`release.json`、`release.json.sig` 必须重算，
+否则 `verify-exe.mjs` 会报「文件被改过或签名不匹配」。
 
 MIT © 2026 白月日和
