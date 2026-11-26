@@ -113,11 +113,13 @@ DNS 一密集就是每秒上千次系统调用。现在 500ms 刷一次快照、
 ## 校验
 
 ```
-sha256    : c51163ab8e5f1da4d76d916cb93e8a2dfbac6578ccb8b25b5a258bed53c47ced
-大小      : 65,962,472 字节
+sha256    : 667422d4faceb053e7176b993b84f1b03b4ca5ccd296fc0fba62f09a71d5dc59
+大小      : 65,963,856 字节
 Ed25519   : 验证通过（node verify-exe.mjs kagenui.exe）
-Authenticode: Valid（cs5 + DigiCert 时间戳，2029-11-17 到期）
-sequence  : 9
+Authenticode: Valid，DigiCert 时间戳，2031-11-25 到期
+签名链    : 白月日和 → Hiyori Code Signing Intermediate CA → Hiyori Code Signing Root CA
+叶指纹    : B7148E12E56A1B857E5D859B69D612CBE8F42462
+sequence  : 10
 ```
 
 两个签名都要一起换：改过 exe 之后 `kagenui.exe.sig`、`release.json`、`release.json.sig` 必须重算，
