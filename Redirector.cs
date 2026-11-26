@@ -807,7 +807,7 @@ internal static class Redirector
             return;
         }
 
-        int pid = FindOwnerPidUdp(sp);
+        int pid = FindOwnerPidUdp(sip, sp);
         if (pid != 0 && IsTarget(pid))
         {
             var clientIp = new IPAddress(BitConverter.GetBytes(sip).Reverse().ToArray());
@@ -852,27 +852,69 @@ internal static class Redirector
         }
     }
 
-    private static int FindOwnerPidUdp(ushort localPort)
+    // ── UDP 归属进程：整表快照 + 缓存 ──────────────────────────────────
+    // 原来每收一个 UDP 包就 GetExtendedUdpTable 一次；DNS 密集时每秒上千次系统调用，
+    // 而且只比端口不比地址——双网卡/双栈下同一本地端口会命中别的进程的 socket。
+    // 现在 500ms 刷一次快照、按 (地址,端口) 查字典；未命中时 100ms 内最多强制刷一次，
+    // 兼顾"新 socket 刚 bind、表还没登记"的漏判。
+    private static readonly object udpTabLock = new();
+    private static Dictionary<ulong, int> udpTab = new();
+    private static Dictionary<ushort, int> udpTabAny = new();
+    private static long udpTabAt;
+    private static long udpTabForceAt;
+
+    private static ulong UdpKey(uint addr, ushort port) => ((ulong)addr << 16) | port;
+
+    private static void RefreshUdpTable(bool force)
     {
-        int size = 0;
-        Native.GetExtendedUdpTable(IntPtr.Zero, ref size, false, 2, UdpTableOwnerPid, 0);
-        if (size <= 0) return 0;
-        IntPtr buf = Marshal.AllocHGlobal(size);
-        try
+        lock (udpTabLock)
         {
-            if (Native.GetExtendedUdpTable(buf, ref size, false, 2, UdpTableOwnerPid, 0) == 0)
+            long now = Environment.TickCount64;
+            if (!force && now - udpTabAt < 500 && udpTab.Count > 0) return;
+            if (force && now - udpTabForceAt < 100) return;
+            if (force) udpTabForceAt = now;
+
+            int size = 0;
+            Native.GetExtendedUdpTable(IntPtr.Zero, ref size, false, 2, UdpTableOwnerPid, 0);
+            if (size <= 0) return;
+            IntPtr buf = Marshal.AllocHGlobal(size);
+            try
             {
+                if (Native.GetExtendedUdpTable(buf, ref size, false, 2, UdpTableOwnerPid, 0) != 0) return;
                 int rows = Marshal.ReadInt32(buf);
                 IntPtr row = IntPtr.Add(buf, 4);
+                udpTab.Clear();
+                udpTabAny.Clear();
                 for (int i = 0; i < rows; i++, row = IntPtr.Add(row, 12))
                 {
+                    uint rawAddr = (uint)Marshal.ReadInt32(row, 0);
                     uint rawPort = (uint)Marshal.ReadInt32(row, 4);
+                    int pid = Marshal.ReadInt32(row, 8);
+                    uint la = (uint)IPAddress.NetworkToHostOrder((int)rawAddr);
                     ushort lp = (ushort)IPAddress.NetworkToHostOrder((short)(rawPort & 0xFFFF));
-                    if (lp == localPort) return Marshal.ReadInt32(row, 8);
+                    if (la == 0) { udpTabAny[lp] = pid; continue; }   // 0.0.0.0 绑定：只按端口算
+                    udpTab[UdpKey(la, lp)] = pid;
                 }
+                udpTabAt = Environment.TickCount64;
             }
+            finally { Marshal.FreeHGlobal(buf); }
         }
-        finally { Marshal.FreeHGlobal(buf); }
+    }
+
+    private static int FindOwnerPidUdp(uint localAddr, ushort localPort)
+    {
+        RefreshUdpTable(false);
+        lock (udpTabLock)
+        {
+            if (udpTab.TryGetValue(UdpKey(localAddr, localPort), out int pid)) return pid;
+            if (udpTabAny.TryGetValue(localPort, out pid)) return pid;
+        }
+        RefreshUdpTable(true);
+        lock (udpTabLock)
+        {
+            if (udpTab.TryGetValue(UdpKey(localAddr, localPort), out int pid)) return pid;
+            if (udpTabAny.TryGetValue(localPort, out pid)) return pid;
+        }
         return 0;
     }
 
