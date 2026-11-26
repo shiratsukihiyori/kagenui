@@ -113,14 +113,24 @@ DNS 一密集就是每秒上千次系统调用。现在 500ms 刷一次快照、
 ## 校验
 
 ```
-sha256    : 667422d4faceb053e7176b993b84f1b03b4ca5ccd296fc0fba62f09a71d5dc59
-大小      : 65,963,856 字节
+sha256    : ac5594fdf30707fb33b5095086dcc4d7e37c59f953a4d26929ed4cb69b455901
+大小      : 65,964,248 字节
 Ed25519   : 验证通过（node verify-exe.mjs kagenui.exe）
 Authenticode: Valid，DigiCert 时间戳，2031-11-25 到期
 签名链    : 白月日和 → Hiyori Code Signing Intermediate CA → Hiyori Code Signing Root CA
-叶指纹    : B7148E12E56A1B857E5D859B69D612CBE8F42462
-sequence  : 10
+叶指纹    : FBE07AF4138916671EB508BCC54588B01AB6B604
+中指纹    : 0071A5080DF3CCC780A108E712D20D7EC06C059D
+sequence  : 11
 ```
+
+**AIA（证书链自动拉取）**：叶子带 `caIssuers` 指向 `signing/hiyori-intermediate.cer`，中间 CA 指向
+`signing/hiyori-root.cer`，仓库 raw 与 `release.hiyori.xx.kg/certs/` 两条 URL 都写进去了：
+
+```
+certutil -verify -urlfetch kagenui.exe
+```
+
+链上缺中间证书的机器，验签时会自己按 AIA 去拉，不用手动装。
 
 两个签名都要一起换：改过 exe 之后 `kagenui.exe.sig`、`release.json`、`release.json.sig` 必须重算，
 否则 `verify-exe.mjs` 会报「文件被改过或签名不匹配」。
