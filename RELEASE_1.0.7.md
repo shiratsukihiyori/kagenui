@@ -39,13 +39,37 @@ UDP ASSOCIATE 回复: 05 00 00 01 ac121ee3 fa33   →  BND = 172.18.30.227:64051
 _socks = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
 ```
 
-**2. DNS 走 CONNECT 隧道**（RFC 1035 §4.2.2 的 2 字节长度前缀）。
-UDP:53 被拦截后不再只指望 SOCKS5 UDP：先用现有 CONNECT 出口连到同一个 DNS 服务器发 DNS/TCP，
-拿到应答再注回客户端；CONNECT 不通才退回 SOCKS5 UDP，行为与 1.0.6 一致。
-连续失败 3 次自动关闭这条兜底，不会在支持 UDP 的机器上白等。
+**2. DNS 三条路，先试原路、确认失败才换道。**
+UDP:53 被拦截后按下面的顺序走，选定的路按远端 DNS 服务器缓存：
+
+```
+① SOCKS5 UDP        客户端原本的 DNS 服务器；700ms 内没回音才算失败
+② CONNECT ip:53     DNS over TCP，RFC 1035 §4.2.2 的 2 字节长度前缀
+③ DoH                CONNECT 1.1.1.1:443 + POST /dns-query，RFC 8484
+```
+
+②③ 都复用本来就在用的 CONNECT 出口，不开新通道。③ 用 IP 直连端点
+（`https://1.1.1.1/dns-query`）不解析域名——那台机器 DNS 本来就是坏的，
+拿域名去连端点等于用坏掉的东西修自己；证书按 `1.1.1.1` 校验。
 
 这条是机房那种「上游 UDP 是黑洞」场景的根解——TCP 出口本来就通，DNS 不该跟着 UDP 一起死。
 （黑洞的表现：UDP ASSOCIATE 成功、包发得出去、回不来，DNS 干等到超时。）
+
+三条路各自单独验过（本机假上游，逐项把下一档条件掐死）：
+
+| 假上游条件 | 选中 | 实测 |
+|---|---|---|
+| UDP 正常 | ① | 45B / 106ms，A=`1.2.3.4` |
+| UDP 黑洞 + 允许 CONNECT :53 | ② | 45B / 1027ms（含 700ms 探测），A=`1.2.3.4` |
+| UDP 黑洞 + 拒绝 CONNECT :53 | ③ | 45B / 1226ms，A=`5.6.7.8`（本地 DoH 服务端签的名） |
+
+第③条对应的日志：
+
+```
+U 8.8.8.8:53  pid=20960  sport=51442
+DNS/TCP 建链失败 8.8.8.8:53: CONNECT 8.8.8.8:53 -> HTTP/1.1 403 Forbidden
+DNS 改走 DoH（1.1.1.1/dns-query）：上游不接受 CONNECT :53
+```
 
 **3. 控制连接 watchdog。** SOCKS5 里上游关掉控制连接就等于 UDP 关联作废（RFC 1928 §7），
 1.0.6 握手完再没人读它，代理一重启 UDP 就永久哑掉，只能手动停/启。现在读到 EOF 就重建关联，

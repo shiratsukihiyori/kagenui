@@ -38,6 +38,13 @@ internal static class DnsTcp
 
     public static void Configure(Action<string> log) => _log = log;
 
+    /// <summary>每次点启动都重新给一次机会：上一轮跑成什么样不该污染这一轮。</summary>
+    public static void Reset()
+    {
+        Enabled = true;
+        _failStreak = 0;
+    }
+
     private static string Key(IPAddress remote, int port) => remote + ":" + port;
 
     /// <summary>发一条查询、取一条应答。失败返回 false，由调用方回退 SOCKS5 UDP。</summary>

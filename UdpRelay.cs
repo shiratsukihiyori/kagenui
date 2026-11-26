@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Kagenui;
 
@@ -41,11 +42,18 @@ internal static class UdpRelay
     private static string? _proxyHost;
     private static int _proxyPort;
 
+    /// <summary>UDP:53 走哪条路，按远端 DNS 服务器缓存</summary>
+    private enum DnsMode { Unknown, Socks, Tcp, Doh }
+    /// <summary>第一次判断「UDP 是不是黑洞」愿意等多久</summary>
+    private const int DnsProbeMs = 700;
+    private static readonly ConcurrentDictionary<string, DnsMode> DnsPaths = new();
+    private static readonly ConcurrentDictionary<string, TaskCompletionSource<byte[]>> Pending = new();
+    private static int _dohLogged;
+
     private static readonly object _reassocLock = new();
     private static volatile string? _warnedUnreachable;
     private static volatile string? _lastThrottled;
     private static long _lastThrottledAt;
-    private static long _dnsTcpHits;
     private static int _dnsTcpLogged;
 
     public static bool IsRunning => _running;
@@ -57,6 +65,11 @@ internal static class UdpRelay
         _proxyHost = proxyHost;
         _proxyPort = proxyPort;
         DnsTcp.Configure(log);
+        DnsTcp.Reset();
+        Doh.Configure(log);
+        Doh.Reset();
+        DnsPaths.Clear();
+        Pending.Clear();
         error = null;
         try
         {
@@ -188,7 +201,8 @@ internal static class UdpRelay
         try { _ctrl?.Close(); } catch { }
         _local = null; _socks = null; _ctrlStream = null; _ctrl = null;
         _warnedUnreachable = null;
-        _dnsTcpHits = 0;
+        DnsPaths.Clear();
+        Pending.Clear();
     }
 
     /// <summary>回收过期流（由 Redirector.Janitor 周期调用），防止长时间运行内存只增不减。</summary>
@@ -207,6 +221,7 @@ internal static class UdpRelay
             }
         }
         DnsTcp.PurgeIdle(120000);
+        Doh.PurgeIdle(120000);
     }
 
     private static byte[] ReadExact(NetworkStream s, int n)
@@ -246,10 +261,10 @@ internal static class UdpRelay
                 // DNS 优先走 TCP：上游 SOCKS5 的 UDP 常常是黑洞（节点不支持 UDP、
                 // 或规则里 REJECT），而 CONNECT 那条出口是通的。交给线程池，
                 // 别让一条 DNS 查询把整个 UDP 中继堵住。
-                if (flow.RemotePort == DnsPort && DnsTcp.Enabled && _proxyHost != null)
+                if (flow.RemotePort == DnsPort && _proxyHost != null)
                 {
                     var q = data; var ep = from; var f = flow;
-                    ThreadPool.QueueUserWorkItem(_ => DnsOverTcp(f, q, ep));
+                    ThreadPool.QueueUserWorkItem(_ => DnsRoute(f, q, ep));
                     continue;
                 }
 
@@ -260,23 +275,90 @@ internal static class UdpRelay
         }
     }
 
-    private static void DnsOverTcp(Flow flow, byte[] query, IPEndPoint client)
+    /// <summary>
+    /// UDP:53 的路由。三条路按「先试客户端的原路、再退」的顺序走，只在确认失败后才换道：
+    ///   SOCKS5 UDP（客户端原本的 DNS 服务器，行为与 1.0.6 一致）
+    ///   → CONNECT ip:53（DNS over TCP，RFC 1035 §4.2.2）
+    ///   → DoH over CONNECT 443（RFC 8484，1.1.1.1/dns-query）
+    /// 选定的路按远端地址缓存，之后同一台 DNS 服务器的查询直接走那条，不再每次等。
+    /// </summary>
+    private static void DnsRoute(Flow flow, byte[] query, IPEndPoint client)
     {
+        string rkey = flow.RemoteIp.ToString();
+        var mode = DnsPaths.GetOrAdd(rkey, DnsMode.Unknown);
+
         try
         {
-            if (DnsTcp.TryQuery(_proxyHost!, _proxyPort, flow.RemoteIp, flow.RemotePort, query, 2500, out var resp))
+            if (mode == DnsMode.Socks)
             {
-                Interlocked.Increment(ref _dnsTcpHits);
-                if (Interlocked.Exchange(ref _dnsTcpLogged, 1) == 0)
-                    _log?.Invoke("DNS 改走 TCP 隧道：UDP:53 不通时由 CONNECT 出口兜底");
-                try { _local?.Send(resp, resp.Length, client); } catch { }
+                ForwardViaSocks(query, flow);
                 return;
             }
-        }
-        catch (Exception e) { WarnThrottled("DNS/TCP: " + e.Message); }
 
-        // DNS/TCP 不通就退回 SOCKS5 UDP，行为与改动前一致
-        ForwardViaSocks(query, flow);
+            if (mode == DnsMode.Tcp || mode == DnsMode.Doh)
+            {
+                object? hit = TryTunnel(flow, query, client, mode);
+                if (hit != null) return;
+                DnsPaths[rkey] = DnsMode.Socks;
+                ForwardViaSocks(query, flow);
+                return;
+            }
+
+            // Unknown：先把包按原路发出去，给它 DnsProbeMs 的时间回话
+            string ckey = client.ToString();
+            var waiter = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Pending[ckey] = waiter;
+            ForwardViaSocks(query, flow);
+
+            bool answered = false;
+            try { answered = waiter.Task.Wait(DnsProbeMs) && waiter.Task.Result.Length > 0; }
+            catch (Exception) { }
+            Pending.TryRemove(ckey, out _);
+
+            if (answered)
+            {
+                DnsPaths[rkey] = DnsMode.Socks;   // 应答已由 SocksReceiveLoop 投递，这里不要再发一次
+                return;
+            }
+
+            var via = TryTunnel(flow, query, client, DnsMode.Tcp) ?? TryTunnel(flow, query, client, DnsMode.Doh);
+            if (via != null) { DnsPaths[rkey] = (DnsMode)via; return; }
+
+            // 三条路都不通：留在 UDP，让客户端自己超时（与 1.0.6 表现一致）
+            DnsPaths[rkey] = DnsMode.Socks;
+            ForwardViaSocks(query, flow);
+        }
+        catch (Exception e) { WarnThrottled("DNS 路由: " + e.Message); }
+    }
+
+    /// <summary>按指定通道发一条 DNS 查询并把应答注回客户端；成功返回该通道枚举，失败返回 null。</summary>
+    private static object? TryTunnel(Flow flow, byte[] query, IPEndPoint client, DnsMode mode)
+    {
+        if (_proxyHost == null) return null;
+        try
+        {
+            if (mode == DnsMode.Tcp && DnsTcp.TryQuery(_proxyHost, _proxyPort, flow.RemoteIp, flow.RemotePort, query, 2500, out var overTcp))
+            {
+                if (Interlocked.Exchange(ref _dnsTcpLogged, 1) == 0)
+                    _log?.Invoke("DNS 改走 TCP 隧道：UDP:53 不通，用 CONNECT 出口兜底");
+                SendToClient(overTcp, client);
+                return DnsMode.Tcp;
+            }
+            if (mode == DnsMode.Doh && Doh.TryQuery(_proxyHost, _proxyPort, query, 2500, out var overDoh))
+            {
+                if (Interlocked.Exchange(ref _dohLogged, 1) == 0)
+                    _log?.Invoke("DNS 改走 DoH（1.1.1.1/dns-query）：上游不接受 CONNECT :53");
+                SendToClient(overDoh, client);
+                return DnsMode.Doh;
+            }
+        }
+        catch (Exception e) { WarnThrottled(mode + ": " + e.Message); }
+        return null;
+    }
+
+    private static void SendToClient(byte[] payload, IPEndPoint client)
+    {
+        try { _local?.Send(payload, payload.Length, client); } catch { }
     }
 
     /// <summary>把一条报文封装进 SOCKS5 UDP 头送给上游中继。</summary>
@@ -355,7 +437,8 @@ internal static class UdpRelay
                     if (!Flows.TryGetValue(key, out var flow)) continue;
                     flow.LastSeen = DateTime.UtcNow.Ticks;
                     var ep = ParseEndPoint(key);
-                    try { _local!.Send(payload, payload.Length, ep); } catch { }
+                    SendToClient(payload, ep);
+                    if (Pending.TryGetValue(key, out var waiter)) waiter.TrySetResult(payload);
                 }
             }
             catch (ObjectDisposedException) { return; }
